@@ -1,6 +1,7 @@
 module(...,package.seeall)
 
 local ffi = require("ffi")
+local lib = require("lib")
 local C = ffi.C
 
 --- ## Chunks

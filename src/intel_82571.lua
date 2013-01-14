@@ -20,84 +20,27 @@ local bits, bitset = lib.bits, lib.bitset
 require("clib_h")
 require("snabb_h")
 
--- FFI definitions for receive and transmit descriptors
-
-ffi.cdef[[
-         // RX descriptor written by software.
-         struct rx_desc {
-            uint64_t address;    // 64-bit address of receive buffer
-            uint64_t dd;         // low bit must be 0, otherwise reserved
-         } __attribute__((packed));
-
-         // RX writeback descriptor written by hardware.
-         struct rx_desc_wb {
-            // uint32_t rss;
-            uint16_t checksum;
-            uint16_t id;
-            uint32_t mrq;
-            uint32_t status;
-            uint16_t length;
-            uint16_t vlan;
-         } __attribute__((packed));
-
-         union rx {
-            struct rx_desc data;
-            struct rx_desc_wb wb;
-         } __attribute__((packed));
-   ]]
-
-ffi.cdef[[
-         // TX Extended Data Descriptor written by software.
-         struct tx_desc {
-            uint64_t address;
-            uint64_t options;
-         } __attribute__((packed));
-
-         struct tx_context_desc {
-            unsigned int tucse:16,
-                         tucso:8,
-                         tucss:8,
-                         ipcse:16,
-                         ipcso:8,
-                         ipcss:8,
-                         mss:16,
-                         hdrlen:8,
-                         rsv:2,
-                         sta:4,
-                         tucmd:8,
-                         dtype:4,
-                         paylen:20;
-         } __attribute__((packed));
-
-         union tx {
-            struct tx_desc data;
-            struct tx_context_desc ctx;
-         };
-   ]]
-
-
 function new (pciaddress)
 
    -- Method dictionary for Intel NIC objects.
    local M = {}
-   M.driver_name = "Intel 82574"
+   M.driver_name = "Intel 82571"
 
    -- Return a table for protected (bounds-checked) memory access.
    -- 
    -- The table can be indexed like a pointer. Index 0 refers to address
    -- BASE+OFFSET, index N refers to address BASE+OFFSET+N*sizeof(TYPE),
-   -- and access to indices >= SIZE is prohibited.
+   -- and access to addresses beyond BASE+OFFSET+SIZE is prohibited.
    --
    -- Examples:
-   --   local mem =  protected("uint32_t", 0x1000, 0x0, 0x080)
+   --   local mem =  protected("uint32_t", 0x1000, 0x0, 0x100)
    --   mem[0x000] => <word at 0x1000>
    --   mem[0x001] => <word at 0x1004>
-   --   mem[0x07F] => <word at 0x11FC>
    --   mem[0x080] => ERROR <address out of bounds: 0x1200>
-   --   mem._ptr   => cdata<uint32_t *>: 0x1000 (get the raw pointer)
+   --   mem.ptr   => cdata<uint32_t *>: 0x1000 (get the raw pointer)
    local function protected (type, base, offset, size)
       type = ffi.typeof(type)
-      local bound = ((size * ffi.sizeof(type)) + 0ULL) / ffi.sizeof(type) 
+      local bound = (size + 0ULL) / ffi.sizeof(type)
       local tptr = ffi.typeof("$ *", type)
       local wrap = ffi.metatype(ffi.typeof("struct { $ _ptr; }", tptr), {
                                    __index = function(w, idx)
@@ -113,7 +56,7 @@ function new (pciaddress)
    end
 
    local num_descriptors = 32 * 1024
-   local buffer_count = 2 * 1024 * 1024
+   local buffer_size = 16384
 
    local rxdesc, rxdesc_phy
    local txdesc, txdesc_phy
@@ -166,10 +109,10 @@ function new (pciaddress)
    end
 
    function reset ()
-      regs[IMC] = 0xffffffff                 -- Disable interrupts
+      regs[IMC] = 0                       -- Disable interrupts
       regs[CTRL] = bits({FD=0,SLU=6,RST=26}) -- Global reset
       C.usleep(10); assert( not bitset(regs[CTRL],26) )
-      regs[IMC] = 0xffffffff                 -- Disable interrupts
+      regs[IMC] = 0                       -- Disable interrupts
    end
 
    function init_pci ()
@@ -179,15 +122,15 @@ function new (pciaddress)
    end
 
    function init_dma_memory ()
-      --local descriptor_bytes = 1024 * 1024
-      --local buffers_bytes = 2 * 1024 * 1024
-      rxdesc, rxdesc_phy = memory.dma_alloc(num_descriptors * ffi.sizeof("union rx"))
-      txdesc, txdesc_phy = memory.dma_alloc(num_descriptors * ffi.sizeof("union tx"))
-      buffers, buffers_phy = memory.dma_alloc(buffer_count * ffi.sizeof("uint8_t"))
+      local descriptor_bytes = 1024 * 1024
+      local buffers_bytes = 2 * 1024 * 1024
+      rxdesc, rxdesc_phy = memory.dma_alloc(descriptor_bytes)
+      txdesc, txdesc_phy = memory.dma_alloc(descriptor_bytes)
+      buffers, buffers_phy = memory.dma_alloc(buffers_bytes)
       -- Add bounds checking
-      rxdesc  = protected("union rx", rxdesc, 0, num_descriptors)
-      txdesc  = protected("union tx", txdesc, 0, num_descriptors)
-      buffers = protected("uint8_t", buffers, 0, buffer_count)
+      rxdesc  = protected("union rx", rxdesc, 0, descriptor_bytes)
+      txdesc  = protected("union tx", txdesc, 0, descriptor_bytes)
+      buffers = protected("uint8_t", buffers, 0, buffers_bytes)
    end
 
    function init_link ()
@@ -264,6 +207,30 @@ function new (pciaddress)
 
    -- Receive functionality
 
+   ffi.cdef[[
+         // RX descriptor written by software.
+         struct rx_desc {
+            uint64_t address;    // 64-bit address of receive buffer
+            uint64_t dd;         // low bit must be 0, otherwise reserved
+         } __attribute__((packed));
+
+         // RX writeback descriptor written by hardware.
+         struct rx_desc_wb {
+            // uint32_t rss;
+            uint16_t checksum;
+            uint16_t id;
+            uint32_t mrq;
+            uint32_t status;
+            uint16_t length;
+            uint16_t vlan;
+         } __attribute__((packed));
+
+         union rx {
+            struct rx_desc data;
+            struct rx_desc_wb wb;
+         } __attribute__((packed));
+   ]]
+
    local rxnext = 0
    local rxbuffers = {}
 
@@ -280,8 +247,8 @@ function new (pciaddress)
       regs[RXCSUM] = 0                 -- Disable checksum offload - not needed
       regs[RADV] = math.log(1024,2)    -- 1us max writeback delay
       regs[RDLEN] = num_descriptors * ffi.sizeof("union rx")
-      regs[RDBAL] = rxdesc_phy % (2^32)
-      regs[RDBAH] = rxdesc_phy / (2^32)
+      regs[RDBAL] = bit.band(rxdesc_phy, 0xffffffff)
+      regs[RDBAH] = 0
       regs[RDH] = 0
       regs[RDT] = 0
       rxnext = 0
@@ -348,6 +315,35 @@ function new (pciaddress)
 
    -- Transmit functionality
 
+   ffi.cdef[[
+         // TX Extended Data Descriptor written by software.
+         struct tx_desc {
+            uint64_t address;
+            uint64_t options;
+         } __attribute__((packed));
+
+         struct tx_context_desc {
+            unsigned int tucse:16,
+                         tucso:8,
+                         tucss:8,
+                         ipcse:16,
+                         ipcso:8,
+                         ipcss:8,
+                         mss:16,
+                         hdrlen:8,
+                         rsv:2,
+                         sta:4,
+                         tucmd:8,
+                         dtype:4,
+                         paylen:20;
+         } __attribute__((packed));
+
+         union tx {
+            struct tx_desc data;
+            struct tx_context_desc ctx;
+         };
+   ]]
+
    function init_transmit ()
       regs[TCTL]        = 0x3103f0f8
       regs[TXDCTL]      = 0x01410000
@@ -362,8 +358,8 @@ function new (pciaddress)
    end
 
    function init_transmit_ring ()
-      regs[TDBAL] = txdesc_phy % (2^32)
-      regs[TDBAH] = txdesc_phy / (2^32)
+      regs[TDBAL] = bit.band(txdesc_phy, 0xffffffff)
+      regs[TDBAH] = 0
       -- Hardware requires the value to be 128-byte aligned
       assert( num_descriptors * ffi.sizeof("union tx") % 128 == 0 )
       regs[TDLEN] = num_descriptors * ffi.sizeof("union tx")
