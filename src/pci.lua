@@ -19,7 +19,7 @@ function suitable_devices ()
 end
 
 function is_suitable (info)
-   return info.vendor == "0x8086" and info.device == "0x10d3" and
+   return info.vendor == "0x8086" and info.device == "0x105e" and
       (info.interface == nil or info.status == 'down')
 end
 
