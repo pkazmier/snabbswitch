@@ -115,6 +115,10 @@ huge_page_size =
 function selftest (options)
    print("selftest: memory")
    local verbose = options.verbose or false
+
+   -- Register the memory we allocated at boot time from kernel
+   install(0x10000000, 16*1024*1024)
+
    print("Kernel HugeTLB pages (/proc/sys/vm/nr_hugepages): " .. get_hugepages())
    for i = 1, 4 do
       io.write("  Allocating a "..(huge_page_size/1024/1024).."MB HugeTLB: ")
