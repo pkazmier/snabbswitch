@@ -157,58 +157,8 @@ function selftest ()
       print("Suitable devices: ")
       for _,device in ipairs(suitable) do
          print("  "..device.pciaddress)
-
-         print("Let's read some PCI configuration registers")
-
-         local fd = open_config(device.pciaddress)
-         local sh = function(offset) 
-            return string.format("0x%.4x", read_config(fd, offset))
-         end
-         local sb = function(offset, bpos)
-            return string.format("%s%d%s", 
-                                 string.rep(".",15-bpos),
-                                 bit.rshift(bit.band(bit.lshift(1,bpos), read_config(fd, offset)), bpos),
-                                 string.rep(".",bpos))
-         end
-
-         print("Vendor", sh(0x0))
-         print("Device", sh(0x2))
-         print("Command", sh(0x4))
-         print(sb(0x4,0), "I/O Access Enable")
-         print(sb(0x4,1), "Memory Access Enable")
-         print(sb(0x4,2), "Enable Mastering")
-         print(sb(0x4,6), "Parity Error Response")
-         print(sb(0x4,8), "SERR# Enable")
-         print(sb(0x4,10), "Interrupt Disable")
-
-         write_config(fd, 0x4, bit.bor(read_config(fd,0x4), lib.bits({InterruptDisable=10})))
-         print("Command", sh(0x4))
-         print(sb(0x4,0), "I/O Access Enable")
-         print(sb(0x4,1), "Memory Access Enable")
-         print(sb(0x4,2), "Enable Mastering")
-         print(sb(0x4,6), "Parity Error Response")
-         print(sb(0x4,8), "SERR# Enable")
-         print(sb(0x4,10), "Interrupt Disable")
-
-
-         print("Status", sh(0x6))
-         print(sb(0x6,3), "Interrupt Status")
-         print(sb(0x6,4), "New Capabilities")
-         print(sb(0x6,8), "Data Parity Reported")
-         print(sb(0x6,11), "Signaled Target Abort")
-         print(sb(0x6,12), "Received Target Abort")
-         print(sb(0x6,13), "Received Master Abort")
-         print(sb(0x6,14), "Signalled System Error")
-         print(sb(0x6,15), "Detected Parity Error")
-
-         print("Press Ctl-D to contitue")
-         io.read()
-
-
       end
    end
-   print("PCI self test completed. Press Ctl-D to contitue.")
-   io.read()
 end
 
 function list_devices ()
