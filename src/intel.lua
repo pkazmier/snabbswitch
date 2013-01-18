@@ -149,6 +149,9 @@ function new (pciaddress)
    local EXTCNF_CTRL = 0x00F00 / 4 -- Extended Configuration Control (RW)
    local POEMB  = 0x00F10 / 4 -- PHY OEM Bits Register (RW)
    local ICR    = 0x000C0 / 4 -- Interrupt Cause Register (RW)
+   local MANC   = 0x05820 / 4 -- Management Control Register (RW/ 82571)
+   local SWSM   = 0x05B50  / 4 -- Software Semaphore (RW / 82571)
+   local EEMNGCTL = 0x01010 / 4 -- MNG EEPROM Control (RW / 82571)
 
    local regs = ffi.cast("uint32_t *", pci.map_pci_memory(pciaddress, 0))
 
@@ -418,32 +421,129 @@ function new (pciaddress)
       return tx_pending() / num_descriptors
    end M.tx_load = tx_load
 
+--[[
+
+   EEPROM/PHY Firmware/Software Synchronization (82571EB)
+
+   For the 82571EB, there are two semaphores located in the Software
+   Semaphore (SWSM) register (see Section 13.8.17).
+
+   • Bit0 (SWSM.SMBI) is the software/software semaphore. This bit is
+     needed in multi-process environments to prevent software running
+     on one port from interferring with software on another the other
+     port.
+
+   • Bit1SWSM.SWESMBI is the software/firmware semaphore. This is
+     always needed when accessing the PHY or EEPROM (reads, writes, or
+     resets). This prevents the firmware and software from accessing
+     the PHY and or EEPROM at the same time.
+
+   If resetting the PHY, the software/software semaphore should not be
+   released until 1 ms after CFG_DONE (bit 18) is set in the MNG
+   EEPROM Control Register (EEMNGCTL) register (see Section
+   13.3.26). The software/firmware semaphore should be released
+   approximately 10 ms after the PHY reset is deasserted before
+   polling of CFG_DONE is attempted. For details on how to reset the
+   PHY see section Section 14.9.
+
+   For EEPROM or PHY register access:
+
+   1. Software reads SWSM.SMBI. If SWSM.SMBI is 0b, then it owns the
+      software/software semaphore and can continue. If SWSM.SMBI is
+      1b, then some other software already has the semaphore.
+   2. Software writes 1b to the SWSM.SWESMBI bit and then reads it. If
+      the value is 1b, then software owns the software/firmware
+      semaphore and can continue; otherwise, firmware has the
+      semaphore.  
+      Software can now access the EEPROM and/or PHY.
+   3. Release the software/firmware semaphore by clearing SWSM.SWESMBI.
+   4. Release the software/software semaphore by clearing SWSM.SMBI.
+
+--]]
+
    -- Read a PHY register.
    function phy_read (phyreg)
+      phy_lock()
       regs[MDIC] = bit.bor(bit.lshift(phyreg, 16), bits({OP1=27,PHYADD0=21}))
       phy_wait_ready()
       local mdic = regs[MDIC]
-      -- phy_unlock_semaphore()
+      phy_unlock()
       assert(bit.band(mdic, bits({ERROR=30})) == 0)
       return bit.band(mdic, 0xffff)
    end
 
    -- Write to a PHY register.
    function phy_write (phyreg, value)
+      phy_lock()
       regs[MDIC] = bit.bor(value, bit.lshift(phyreg, 16), bits({OP0=26,PHYADD0=21}))
       phy_wait_ready()
-      return bit.band(regs[MDIC], bits({ERROR=30})) == 0
+      local mdic = regs[MDIC]
+      phy_unlock()
+      return bit.band(mdic, bits({ERROR=30})) == 0
    end
 
    function phy_wait_ready ()
+      -- Calling function should call this in between calls to phy_lock/unlock
       while bit.band(regs[MDIC], bits({READY=28,ERROR=30})) == 0 do
          ffi.C.usleep(2000)
       end
    end
 
+--[[
+   PHY Reset (82571EB/82572EI):
+   To reset the PHY using software:
+   
+   1. Obtain the Software/Software semaphore (SWSM.SMBI - 05B50h; bit
+      0). This is needed for multi-threaded environments.
+   2. Read (MANC.BLK_Phy_Rst_On_IDE – 05820h; bit 18) and then wait
+      until it becomes 0b.
+   3. Obtain the Software/Firmware semaphore (SWSM.SWESMBI - 05B50h;
+      bit 1).
+   4. Drive PHY reset (CTRL.PHY_RST at offset 0000h [bit 31], write
+      1b, wait 100 μs, and then write 0b).
+   5. Release the Software/Firmware semaphore (SWSM.SWESMBI - 05B50h;
+      bit 1).
+   6. Wait for the CFG_DONE (EEMNGCTL.CFG_DONE at offset 1010h [bit
+      18] becomes 1b).
+   7. Wait for a 1 ms delay. The PHY should now be ready. If
+      additional access to the PHY is necessary (reads or writes) the
+      Software/Firmware semaphore (SWSM.SWESMBI - 05B50h; bit 1) must be
+      re-acquired and then released once done.
+   8. Release the Software/Software semaphore (SWSM.SMBI - 05B50h; bit
+      0). This is needed for multi-threaded environments.
+
+--]]
+
    function reset_phy ()
+      -- Step 2
+      while bit.band(regs[MANC], bits({Blk_Phy_Rst_On_IDE=18})) ~= 0 do
+         ffi.C.usleep(2000)
+      end
+
+      -- Step 3
+      phy_lock()
+
+      -- Step 4
+      regs[CTRL] = bit.bor(regs[CTRL], bits({PHY_RST=31}))
+      ffi.C.usleep(100)
+      regs[CTRL] = bit.band(regs[CTRL], bit.bnot(bits({PHY_RST=31})))
+
+      -- Step 5
+      phy_unlock()
+
+      -- Step 6
+      while bit.band(regs[EEMNGCTL], bits({CFG_DONE=18})) == 0 do
+         ffi.C.usleep(2000)
+      end
+
+      -- Step 7
       phy_write(0, bits({AutoNeg=12,Duplex=8,RestartAutoNeg=9}))
       ffi.C.usleep(1)
+
+      -- I'm not sure if this code is sufficient to reset the PHY, in
+      -- the 82571 doc, it doesn't even mention the need to set the
+      -- RST in the PHY.PCTRL register to reset the PHY (see steps
+      -- above).
       phy_write(0, bit.bor(bits({RST=15}), phy_read(0)))
    end
 
@@ -455,15 +555,30 @@ function new (pciaddress)
    -- Lock and unlock the PHY semaphore. This is used to avoid race
    -- conditions between software and hardware both accessing the PHY.
 
+--[[
+   82571 Procedure on locking PHY access.
+
+   1. Software writes 1b to the SWSM.SWESMBI bit and then reads it. If
+      the value is 1b, then software owns the software/firmware
+      semaphore and can continue; otherwise, firmware has the
+      semaphore.
+      Software can now access the EEPROM and/or PHY.
+   2. Release the software/firmware semaphore by clearing SWSM.SWESMBI.
+--]]
+
    function phy_lock ()
-      regs[EXTCNF_CTRL] = bits({MDIO_SW=5})
-      while bit.band(regs[EXTCNF_CTRL], bits({MDIO_SW=5})) == 0 do
+      regs[SWSM] = bit.bor(regs[SWSM], bits({SWESMBI=1}))
+      while bit.band(regs[SWSM], bits({SWESMBI=1})) == 0 do
          ffi.C.usleep(2000)
+         -- Docs weren't clear if we are supposed to try and set this 
+         -- value to 1 again, so this may not be needed. I need to 
+         -- check some other drivers.
+         regs[SWSM] = bit.bor(regs[SWSM], bits({SWESMBI=1}))
       end
    end
 
    function phy_unlock ()
-      regs[EXTCNF_CTRL] = 0
+      regs[SWSM] = bit.band(regs[SWSM], bit.bnot(bits({SWESMBI=1})))
    end
 
    -- Link control.
@@ -608,6 +723,10 @@ function new (pciaddress)
          M.update_stats()
          M.print_stats()
       end
+
+      print(">>> DEBUG: After test, leaving selftest")
+      M.print_status()
+
    end
 
    -- Test that TCP Segmentation Optimization (TSO) works.
