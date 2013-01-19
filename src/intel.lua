@@ -536,6 +536,7 @@ function new (pciaddress)
       end
 
       -- Step 7
+      ffi.C.usleep(1000)
       phy_write(0, bits({AutoNeg=12,Duplex=8,RestartAutoNeg=9}))
       ffi.C.usleep(1)
 
