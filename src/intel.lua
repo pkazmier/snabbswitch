@@ -514,13 +514,16 @@ function new (pciaddress)
 --]]
 
    function reset_phy ()
+      -- Step 1
+      phy_lock({sw=true})
+
       -- Step 2
       while bit.band(regs[MANC], bits({Blk_Phy_Rst_On_IDE=18})) ~= 0 do
          ffi.C.usleep(2000)
       end
 
       -- Step 3
-      phy_lock()
+      phy_lock({fw=true})
 
       -- Step 4
       regs[CTRL] = bit.bor(regs[CTRL], bits({PHY_RST=31}))
@@ -528,7 +531,7 @@ function new (pciaddress)
       regs[CTRL] = bit.band(regs[CTRL], bit.bnot(bits({PHY_RST=31})))
 
       -- Step 5
-      phy_unlock()
+      phy_unlock({fw=true})
 
       -- Step 6
       while bit.band(regs[EEMNGCTL], bits({CFG_DONE=18})) == 0 do
@@ -536,6 +539,10 @@ function new (pciaddress)
       end
 
       -- Step 7
+      -- Must unlock software lock here as the next phy_write's 
+      -- will obtain both locks as part of any write or read.
+      phy_unlock({sw=true}) 
+
       ffi.C.usleep(1000)
       phy_write(0, bits({AutoNeg=12,Duplex=8,RestartAutoNeg=9}))
       ffi.C.usleep(1)
@@ -555,30 +562,49 @@ function new (pciaddress)
    -- Lock and unlock the PHY semaphore. This is used to avoid race
    -- conditions between software and hardware both accessing the PHY.
 
---[[
-   82571 Procedure on locking PHY access.
+   -- Obtain lock for PHY access. If no options are passed, obtain
+   -- both a software lock and a firmware lock. Software lock is
+   -- obtained first. A software only lock can be requested by passing
+   -- {sw=true}, while a firmware only lock can be requested by
+   -- passing {fw=true}.
+   function phy_lock (options)
+      options = options or {sw=true, fw=true}
 
-   1. Software writes 1b to the SWSM.SWESMBI bit and then reads it. If
-      the value is 1b, then software owns the software/firmware
-      semaphore and can continue; otherwise, firmware has the
-      semaphore.
-      Software can now access the EEPROM and/or PHY.
-   2. Release the software/firmware semaphore by clearing SWSM.SWESMBI.
---]]
+      if options.sw then
+         -- Obtain the software/software semaphore. We need to do so with
+         -- the 82571 as it is a two-port card and another driver could
+         -- be trying to configure the controller at the same time.
+         while bit.band(regs[SWSM], bits({SMBI=0})) ~= 0 do
+            ffi.C.usleep(2000)
+         end
+      end
 
-   function phy_lock ()
-      regs[SWSM] = bit.bor(regs[SWSM], bits({SWESMBI=1}))
-      while bit.band(regs[SWSM], bits({SWESMBI=1})) == 0 do
-         ffi.C.usleep(2000)
-         -- Docs weren't clear if we are supposed to try and set this 
-         -- value to 1 again, so this may not be needed. I need to 
-         -- check some other drivers.
+      if options.fw then
          regs[SWSM] = bit.bor(regs[SWSM], bits({SWESMBI=1}))
+         while bit.band(regs[SWSM], bits({SWESMBI=1})) == 0 do
+            ffi.C.usleep(2000)
+            -- Docs weren't clear if we are supposed to try and set this
+            -- value to 1 again, so this may not be needed. I need to
+            -- check some other drivers.
+            regs[SWSM] = bit.bor(regs[SWSM], bits({SWESMBI=1}))
+         end
       end
    end
 
-   function phy_unlock ()
-      regs[SWSM] = bit.band(regs[SWSM], bit.bnot(bits({SWESMBI=1})))
+   -- Release the lock for PHY access. If no options are passed,
+   -- release both a software lock and a firmware lock. The firmware
+   -- lock is released first. A software only release can be requested
+   -- by passing {sw=true}, while a firmware only release can be
+   -- requested by passing {fw=true}. 
+   function phy_unlock (options)
+      options = options or {sw=true, fw=true}
+
+      if options.fw then
+         regs[SWSM] = bit.band(regs[SWSM], bit.bnot(bits({SWESMBI=1})))
+      end
+      if options.sw then
+         regs[SWSM] = bit.band(regs[SWSM], bit.bnot(bits({SMBI=0})))
+      end
    end
 
    -- Link control.
