@@ -1,0 +1,6 @@
+- When using HugeTLB, the memory selftest allocates four hugetlb's
+  that are never used (wasting 8MB of memory).
+- In both the transmit and receive tests, init() is called twice,
+  which means init_dma_memory() is also called twice, and thus
+  allocating 4MB of memory each time.
+
