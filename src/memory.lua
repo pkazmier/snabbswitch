@@ -117,7 +117,7 @@ function selftest (options)
    local verbose = options.verbose or false
 
    -- Register the memory we allocated at boot time from kernel
-   install(0x10000000, 16*1024*1024)
+   --install(0x10000000, 16*1024*1024)
 
    print("Kernel HugeTLB pages (/proc/sys/vm/nr_hugepages): " .. get_hugepages())
    for i = 1, 4 do
